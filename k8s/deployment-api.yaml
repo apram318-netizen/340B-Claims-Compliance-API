@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claims-api
+  namespace: claims-system
+  labels:
+    app: claims-api
+    app.kubernetes.io/part-of: claims-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: claims-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: claims-api
+    spec:
+      serviceAccountName: claims-system
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532   # distroless nonroot uid
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: your-registry/claims-api:latest  # replace with your image
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: claims-system-config
+            - secretRef:
+                name: claims-system-secrets
+          env:
+            - name: EXPORT_DIR
+              value: /exports
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: export-storage
+              mountPath: /exports
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: export-storage
+          persistentVolumeClaim:
+            claimName: export-storage
+        - name: tmp
+          emptyDir: {}

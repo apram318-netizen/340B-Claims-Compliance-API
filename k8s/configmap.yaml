@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claims-system-config
+  namespace: claims-system
+data:
+  PORT: "8080"
+  METRICS_PORT: "9091"
+  # Set ALLOWED_ORIGIN to your frontend domain in production, e.g.:
+  # ALLOWED_ORIGIN: "https://app.example.com"
+  ALLOWED_ORIGIN: ""

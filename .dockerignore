@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+*.env
+*.env.*
+**_test.go
+vendor/
+tmp/
+dist/
+k8s/
+*.md

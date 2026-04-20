@@ -1,0 +1,27 @@
+-- +goose Up
+
+ALTER TABLE designations
+ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+
+ALTER TABLE pharmacies
+ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+
+ALTER TABLE users
+ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+
+ALTER TABLE organizations
+ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+
+-- +goose Down
+
+ALTER TABLE designations
+ALTER COLUMN created_at TYPE TIMESTAMP;
+
+ALTER TABLE pharmacies
+ALTER COLUMN created_at TYPE TIMESTAMP;
+
+ALTER TABLE users
+ALTER COLUMN created_at TYPE TIMESTAMP;
+
+ALTER TABLE organizations
+ALTER COLUMN created_at TYPE TIMESTAMP;

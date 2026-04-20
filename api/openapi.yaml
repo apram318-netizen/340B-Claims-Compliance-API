@@ -1,0 +1,1430 @@
+openapi: 3.0.3
+info:
+  title: Claims System API
+  version: 0.5.0
+  description: |
+    Backend API for claims ingestion, reconciliation, policy administration, and reporting.
+
+    **Sensitive fields:** When `API_REDACT_SENSITIVE_FIELDS` is true (default), claim JSON masks pharmacy NPI and redacts `hashed_rx_key`.
+    CSV exports honor `EXPORT_REDACT_SENSITIVE_FIELDS` (default true) for the same columns.
+
+    **Password reset:** Production sends the token by email (SMTP env vars). `PASSWORD_RESET_EXPOSE_TOKEN` returns the token in JSON for dev/tests only.
+    `PASSWORD_RESET_PUBLIC_BASE_URL` is used in the email body for the API base URL (default `http://localhost:$PORT`).
+
+    **Admin MFA:** When `REQUIRE_MFA_FOR_ADMIN=true`, users with an admin role cannot log in until MFA is enabled (`code` MFA_SETUP_REQUIRED).
+
+    **MFA step-up:** When `REQUIRE_MFA_STEP_UP_FOR_ADMIN=true`, MFA-enabled admins must call `POST /v1/mfa/step-up` and send the returned token on the `X-MFA-Step-Up` header for mutating admin routes (organizations, manufacturers, policies, rebate records, contract pharmacies, dispute resolution).
+
+    **Platform (v1):** Tenant admin routes under `/v1/organizations/{id}/` for settings, users, feature flags, SSO (OIDC + SAML), webhooks, and exception cases. See `CHANGELOG.md` and `docs/integrator-guide.md`.
+
+    **SSO:** OIDC `GET /v1/auth/oidc/login|callback`. SAML SP `GET /v1/auth/saml/login`, `POST /v1/auth/saml/acs`, `GET /v1/auth/saml/metadata` (SP key/cert via env).
+
+    **SCIM 2.0:** `/scim/v2` with `Authorization: Bearer` (`SCIM_BEARER_TOKEN`); uses `SCIM_ORG_ID`.
+
+    **Tracing:** Set `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) and `OTEL_SERVICE_NAME` for OpenTelemetry OTLP/HTTP. W3C `traceparent` is honored; responses include `X-Trace-Id`.
+
+    **API version:** `GET /api/version` returns the major API version.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      summary: Health check
+      security: []
+      responses:
+        "200": {description: Service healthy}
+        "503": {description: Service degraded, database unavailable}
+  /metrics:
+    get:
+      summary: Runtime metrics
+      security: []
+      responses:
+        "200":
+          description: Prometheus-compatible metrics text
+          content:
+            text/plain:
+              schema: {type: string}
+  /v1/register:
+    post:
+      summary: Register a user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RegisterRequest"}
+      responses:
+        "201": {description: User created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/login:
+    post:
+      summary: Login and obtain JWT (include totp_code when MFA is enabled for the account)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LoginRequest"}
+      responses:
+        "200": {description: Login success}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403":
+          description: |
+            MFA code required (`code` MFA_REQUIRED), admin must enroll MFA (`code` MFA_SETUP_REQUIRED when REQUIRE_MFA_FOR_ADMIN),
+            or related MFA policy response.
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /v1/password-reset/request:
+    post:
+      summary: Request password reset (email when SMTP configured; optional token in JSON when PASSWORD_RESET_EXPOSE_TOKEN)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: {type: string, format: email}
+      responses:
+        "200":
+          description: |
+            Acknowledged (always, to avoid user enumeration). May include `token` only when PASSWORD_RESET_EXPOSE_TOKEN is enabled.
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/password-reset/confirm:
+    post:
+      summary: Confirm password reset with token and new password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: {type: string}
+                password: {type: string}
+      responses:
+        "200": {description: Password updated}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "422": {description: Invalid or expired token}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /v1/organizations:
+    post:
+      summary: Create organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateOrganizationRequest"}
+      responses:
+        "201": {description: Organization created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/organizations/{id}:
+    get:
+      summary: Get organization
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      responses:
+        "200": {description: Organization found}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/batches:
+    post:
+      summary: Create batch from inline row payload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateBatchRequest"}
+      responses:
+        "201": {description: Batch created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/batches/upload:
+    post:
+      summary: Upload CSV/XLSX batch
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        "201": {description: Batch created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/batches/{id}:
+    get:
+      summary: Get batch
+      parameters: [{$ref: "#/components/parameters/BatchID"}]
+      responses:
+        "200": {description: Batch found}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+  /v1/batches/{id}/claims:
+    get:
+      summary: Get claims for batch
+      parameters:
+        - {$ref: "#/components/parameters/BatchID"}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Claims listed}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /v1/batches/{id}/reconciliation-job:
+    get:
+      summary: Get reconciliation job for batch
+      parameters: [{$ref: "#/components/parameters/BatchID"}]
+      responses:
+        "200": {description: Job found}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/claims/{id}:
+    get:
+      summary: Get claim (NPI / hashed_rx_key may be redacted per API_REDACT_SENSITIVE_FIELDS)
+      parameters: [{$ref: "#/components/parameters/ClaimID"}]
+      responses:
+        "200": {description: Claim found}
+  /v1/claims/{id}/decision:
+    get:
+      summary: Get claim decision
+      parameters: [{$ref: "#/components/parameters/ClaimID"}]
+      responses:
+        "200": {description: Decision found}
+  /v1/claims/{id}/override:
+    post:
+      summary: Override claim decision
+      parameters: [{$ref: "#/components/parameters/ClaimID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/OverrideRequest"}
+      responses:
+        "200": {description: Override persisted}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /v1/manufacturers:
+    post:
+      summary: Create manufacturer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateManufacturerRequest"}
+      responses:
+        "201": {description: Manufacturer created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    get:
+      summary: List manufacturers
+      parameters:
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Manufacturers listed}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /v1/manufacturers/{id}:
+    get:
+      summary: Get manufacturer
+      parameters: [{$ref: "#/components/parameters/ManufacturerID"}]
+      responses:
+        "200": {description: Manufacturer found}
+  /v1/manufacturers/{id}/products:
+    post:
+      summary: Create manufacturer product
+      parameters: [{$ref: "#/components/parameters/ManufacturerID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateManufacturerProductRequest"}
+      responses:
+        "201": {description: Product created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    get:
+      summary: List manufacturer products
+      parameters:
+        - {$ref: "#/components/parameters/ManufacturerID"}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Products listed}
+        "400": {$ref: "#/components/responses/ValidationError"}
+  /v1/manufacturers/{id}/policies:
+    post:
+      summary: Create policy for manufacturer
+      parameters: [{$ref: "#/components/parameters/ManufacturerID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreatePolicyRequest"}
+      responses:
+        "201": {description: Policy created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    get:
+      summary: List policies for manufacturer
+      parameters:
+        - {$ref: "#/components/parameters/ManufacturerID"}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Policies listed}
+        "400": {$ref: "#/components/responses/ValidationError"}
+
+  /v1/policies/{id}/versions:
+    post:
+      summary: Create policy version
+      parameters: [{$ref: "#/components/parameters/PolicyID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreatePolicyVersionRequest"}
+      responses:
+        "201": {description: Policy version created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/policy-versions/{id}/rules:
+    post:
+      summary: Create policy rule
+      parameters: [{$ref: "#/components/parameters/PolicyVersionID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreatePolicyRuleRequest"}
+      responses:
+        "201": {description: Policy rule created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+    get:
+      summary: List policy rules
+      parameters:
+        - {$ref: "#/components/parameters/PolicyVersionID"}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Policy rules listed}
+        "400": {$ref: "#/components/responses/ValidationError"}
+
+  /v1/rebate-records:
+    post:
+      summary: Create rebate record
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateRebateRecordRequest"}
+      responses:
+        "201": {description: Rebate record created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /v1/reconciliation-jobs/{id}:
+    get:
+      summary: Get reconciliation job
+      parameters: [{$ref: "#/components/parameters/JobID"}]
+      responses:
+        "200": {description: Job found}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+  /v1/reconciliation-jobs/{id}/decisions:
+    get:
+      summary: Get decisions for reconciliation job
+      parameters:
+        - {$ref: "#/components/parameters/JobID"}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Decisions listed}
+        "400": {$ref: "#/components/responses/ValidationError"}
+
+  /v1/exports:
+    post:
+      summary: Create asynchronous export run
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateExportRequest"}
+      responses:
+        "201": {description: Export run created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/exports/{id}:
+    get:
+      summary: Get export run
+      parameters: [{$ref: "#/components/parameters/ExportID"}]
+      responses:
+        "200": {description: Export run found}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+  /v1/exports/{id}/download:
+    get:
+      summary: Download completed export CSV
+      parameters: [{$ref: "#/components/parameters/ExportID"}]
+      responses:
+        "200":
+          description: CSV streamed
+          content:
+            text/csv:
+              schema: {type: string}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/exports/{id}/retry:
+    post:
+      summary: Requeue export generation
+      parameters: [{$ref: "#/components/parameters/ExportID"}]
+      responses:
+        "202": {description: Export requeued}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /v1/logout:
+    post:
+      summary: Revoke current JWT (adds jti to blocklist when Redis is configured)
+      responses:
+        "204": {description: Logged out}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+
+  /v1/mfa/setup:
+    post:
+      summary: Generate TOTP enrollment secret and otpauth URL (authenticator app)
+      responses:
+        "200":
+          description: Enrollment material
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secret, otpauth_url]
+                properties:
+                  secret: {type: string}
+                  otpauth_url: {type: string}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/mfa/enable:
+    post:
+      summary: Enable MFA after verifying an authenticator code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [secret, code]
+              properties:
+                secret: {type: string, description: Base32 secret from setup}
+                code: {type: string, description: 6-digit TOTP code}
+      responses:
+        "200":
+          description: MFA enabled; returns user and one-time backup_codes (store securely; shown only here)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, backup_codes]
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id: {type: string, format: uuid}
+                      org_id: {type: string, format: uuid}
+                      email: {type: string}
+                      name: {type: string}
+                      role: {type: string}
+                      mfa_enabled: {type: boolean}
+                      created_at: {type: string, format: date-time}
+                  backup_codes:
+                    type: array
+                    items: {type: string}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/mfa/backup-codes/regenerate:
+    post:
+      summary: Regenerate MFA backup codes (requires current TOTP code)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: {type: string, description: Current 6-digit TOTP code}
+      responses:
+        "200":
+          description: New backup codes (one-time display)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [backup_codes]
+                properties:
+                  backup_codes:
+                    type: array
+                    items: {type: string}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/mfa/step-up:
+    post:
+      summary: Obtain a short-lived step-up token (for header X-MFA-Step-Up on sensitive admin operations)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                totp_code: {type: string, description: 6-digit TOTP (use this or backup_code)}
+                backup_code: {type: string, description: One-time backup code}
+      responses:
+        "200":
+          description: Step-up token (~10 minutes); send as X-MFA-Step-Up on subsequent admin requests when REQUIRE_MFA_STEP_UP_FOR_ADMIN is set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [step_up_token, expires_in]
+                properties:
+                  step_up_token: {type: string}
+                  expires_in: {type: integer, description: Suggested TTL in seconds}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/mfa/disable:
+    post:
+      summary: Disable MFA (requires account password)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: {type: string}
+      responses:
+        "200": {description: MFA disabled}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /v1/contract-pharmacies:
+    get:
+      summary: List contract pharmacies (member org; admin may filter by org_id)
+      parameters:
+        - in: query
+          name: org_id
+          required: false
+          schema: {type: string, format: uuid}
+      responses:
+        "200": {description: List of contract pharmacies}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+    post:
+      summary: Create contract pharmacy (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateContractPharmacyRequest"}
+      responses:
+        "201": {description: Created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/contract-pharmacies/{id}:
+    get:
+      summary: Get contract pharmacy by ID
+      parameters: [{$ref: "#/components/parameters/ContractPharmacyID"}]
+      responses:
+        "200": {description: Found}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+  /v1/contract-pharmacies/{id}/status:
+    patch:
+      summary: Update contract pharmacy status (admin)
+      parameters: [{$ref: "#/components/parameters/ContractPharmacyID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: {type: string, enum: [active, inactive, suspended]}
+      responses:
+        "200": {description: Updated}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+  /v1/manufacturers/{id}/contract-pharmacy-auths:
+    post:
+      summary: Authorize a contract pharmacy for a manufacturer (admin)
+      parameters: [{$ref: "#/components/parameters/ManufacturerID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contract_pharmacy_id, authorized]
+              properties:
+                contract_pharmacy_id: {type: string, format: uuid}
+                authorized: {type: boolean}
+                effective_from: {type: string, format: date}
+                effective_to: {type: string, format: date}
+      responses:
+        "201": {description: Authorization created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /v1/disputes:
+    post:
+      summary: Open a manufacturer dispute on a claim
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateDisputeRequest"}
+      responses:
+        "201": {description: Dispute created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "500": {$ref: "#/components/responses/InternalError"}
+  /v1/disputes/{id}:
+    get:
+      summary: Get dispute by ID
+      parameters: [{$ref: "#/components/parameters/DisputeID"}]
+      responses:
+        "200": {description: Found}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+  /v1/disputes/{id}/submit:
+    post:
+      summary: Submit dispute for review (open to submitted)
+      parameters: [{$ref: "#/components/parameters/DisputeID"}]
+      responses:
+        "200": {description: Updated}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+  /v1/disputes/{id}/resolve:
+    post:
+      summary: Resolve dispute (admin)
+      parameters: [{$ref: "#/components/parameters/DisputeID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accepted, resolution]
+              properties:
+                accepted: {type: boolean}
+                resolution: {type: string}
+      responses:
+        "200": {description: Resolved}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+  /v1/disputes/{id}/withdraw:
+    post:
+      summary: Withdraw dispute
+      parameters: [{$ref: "#/components/parameters/DisputeID"}]
+      responses:
+        "200": {description: Withdrawn}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+  /v1/claims/{id}/disputes:
+    get:
+      summary: List disputes for a claim
+      parameters: [{$ref: "#/components/parameters/ClaimID"}]
+      responses:
+        "200": {description: List of disputes}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/audit-events:
+    get:
+      summary: Query audit events by entity
+      parameters:
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+        - in: query
+          name: entity_type
+          required: true
+          schema: {type: string}
+        - in: query
+          name: entity_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Audit events listed}
+        "400": {$ref: "#/components/responses/ValidationError"}
+
+  /api/version:
+    get:
+      summary: API product version metadata
+      security: []
+      responses:
+        "200":
+          description: Major version and service name
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, service]
+                properties:
+                  version: {type: string, example: "1"}
+                  service: {type: string, example: "claims-system-api"}
+
+  /v1/auth/oidc/login:
+    get:
+      summary: Start OIDC authorization code flow (redirects to IdP)
+      security: []
+      parameters:
+        - in: query
+          name: org_id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "302": {description: Redirect to identity provider}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/auth/oidc/callback:
+    get:
+      summary: OIDC callback — exchanges code and returns JWT + user
+      security: []
+      parameters:
+        - in: query
+          name: code
+          schema: {type: string}
+        - in: query
+          name: state
+          schema: {type: string}
+      responses:
+        "200": {description: Session token issued}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+
+  /v1/auth/saml/login:
+    get:
+      summary: Start SAML SP-initiated SSO (HTTP-Redirect to IdP)
+      security: []
+      parameters:
+        - in: query
+          name: org_id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "302": {description: Redirect to IdP SSO URL}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "503": {$ref: "#/components/responses/InternalError"}
+
+  /v1/auth/saml/acs:
+    post:
+      summary: SAML Assertion Consumer Service (returns JWT + user)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [SAMLResponse, RelayState]
+              properties:
+                SAMLResponse: {type: string}
+                RelayState: {type: string}
+      responses:
+        "200": {description: Session token issued}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+
+  /v1/auth/saml/metadata:
+    get:
+      summary: SAML SP metadata (register with IdP)
+      security: []
+      responses:
+        "200":
+          description: SAML metadata XML
+          content:
+            application/samlmetadata+xml:
+              schema: {type: string}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/organizations/{id}/settings:
+    get:
+      summary: Get organization settings JSON
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      responses:
+        "200": {description: Settings object}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+    patch:
+      summary: Patch organization settings (merge JSON)
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200": {description: Updated settings}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/users:
+    get:
+      summary: List users in organization (org admin)
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      responses:
+        "200": {description: User list}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/users/{userId}:
+    patch:
+      summary: Update user role (org admin)
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/OrgUserID"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: {type: string, enum: [member, admin, viewer]}
+      responses:
+        "200": {description: Updated user}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/feature-flags:
+    get:
+      summary: Effective feature flags (global env merged with org overrides)
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      responses:
+        "200": {description: Flags map and override rows}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/feature-flags/{key}:
+    put:
+      summary: Set per-org feature flag override
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - in: path
+          name: key
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: {type: boolean}
+      responses:
+        "200": {description: Override saved}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/sso:
+    get:
+      summary: Get OIDC/SAML SSO configuration (secrets masked)
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      responses:
+        "200": {description: SSO config}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+    put:
+      summary: Update OIDC and/or SAML IdP settings
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: {type: boolean}
+                oidc_issuer: {type: string}
+                oidc_client_id: {type: string}
+                oidc_client_secret: {type: string}
+                saml_idp_entity_id: {type: string}
+                saml_idp_sso_url: {type: string}
+                saml_idp_cert_pem: {type: string}
+      responses:
+        "200": {description: SSO config}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/organizations/{id}/webhooks:
+    get:
+      summary: List webhook subscriptions
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      responses:
+        "200": {description: Webhooks listed}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+    post:
+      summary: Create webhook subscription
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, secret_hmac, event_types]
+              properties:
+                url: {type: string, format: uri}
+                secret_hmac: {type: string}
+                event_types:
+                  type: array
+                  items: {type: string}
+                active: {type: boolean}
+      responses:
+        "201": {description: Created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/webhooks/{webhookId}:
+    patch:
+      summary: Update webhook
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/WebhookID"}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: {type: string}
+                event_types:
+                  type: array
+                  items: {type: string}
+                active: {type: boolean}
+      responses:
+        "200": {description: Updated}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+    delete:
+      summary: Delete webhook
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/WebhookID"}
+      responses:
+        "204": {description: Deleted}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/organizations/{id}/webhooks/{webhookId}/deliveries:
+    get:
+      summary: List webhook delivery attempts
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/WebhookID"}
+        - {$ref: "#/components/parameters/Limit"}
+      responses:
+        "200": {description: Deliveries listed}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/cases:
+    get:
+      summary: List exception cases
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Cases listed}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+    post:
+      summary: Create exception case
+      parameters: [{$ref: "#/components/parameters/OrganizationID"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: {type: string}
+                claim_id: {type: string, format: uuid}
+                batch_id: {type: string, format: uuid}
+                status: {type: string}
+                priority: {type: string}
+                assignee_user_id: {type: string, format: uuid}
+      responses:
+        "201": {description: Created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /v1/organizations/{id}/cases/{caseId}:
+    get:
+      summary: Get exception case
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/CaseID"}
+      responses:
+        "200": {description: Case}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+    patch:
+      summary: Update exception case
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/CaseID"}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200": {description: Updated}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /v1/organizations/{id}/cases/{caseId}/comments:
+    get:
+      summary: List case comments
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/CaseID"}
+      responses:
+        "200": {description: Comments listed}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+    post:
+      summary: Add case comment
+      parameters:
+        - {$ref: "#/components/parameters/OrganizationID"}
+        - {$ref: "#/components/parameters/CaseID"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: {type: string}
+      responses:
+        "201": {description: Comment created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "403": {$ref: "#/components/responses/ForbiddenError"}
+
+  /scim/v2/ServiceProviderConfig:
+    get:
+      summary: SCIM service provider configuration
+      security: [{scimBearer: []}]
+      responses:
+        "200": {description: ServiceProviderConfig}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /scim/v2/ResourceTypes:
+    get:
+      summary: SCIM resource types
+      security: [{scimBearer: []}]
+      responses:
+        "200": {description: ListResponse of ResourceType}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+
+  /scim/v2/Schemas:
+    get:
+      summary: SCIM schema list
+      security: [{scimBearer: []}]
+      responses:
+        "200": {description: ListResponse of Schema}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+
+  /scim/v2/Schemas/{id}:
+    get:
+      summary: SCIM schema by URI
+      security: [{scimBearer: []}]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Schema}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+  /scim/v2/Users:
+    get:
+      summary: List or filter Users (SCIM 2.0)
+      security: [{scimBearer: []}]
+      parameters:
+        - in: query
+          name: filter
+          schema: {type: string}
+        - in: query
+          name: startIndex
+          schema: {type: integer}
+        - in: query
+          name: count
+          schema: {type: integer}
+      responses:
+        "200": {description: ListResponse}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+    post:
+      summary: Create User (SCIM 2.0)
+      security: [{scimBearer: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "201": {description: User created}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "409": {$ref: "#/components/responses/ConflictError"}
+
+  /scim/v2/Users/{id}:
+    get:
+      summary: Get User by id
+      security: [{scimBearer: []}]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "200": {description: User}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+    patch:
+      summary: Patch User (SCIM PatchOp)
+      security: [{scimBearer: []}]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200": {description: User}
+        "400": {$ref: "#/components/responses/ValidationError"}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+    delete:
+      summary: Deactivate user (SCIM soft delete)
+      security: [{scimBearer: []}]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        "204": {description: Deactivated}
+        "401": {$ref: "#/components/responses/UnauthorizedError"}
+        "404": {$ref: "#/components/responses/NotFoundError"}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    scimBearer:
+      type: http
+      scheme: bearer
+      description: Value must match SCIM_BEARER_TOKEN; SCIM_ORG_ID scopes the tenant.
+  parameters:
+    OrganizationID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    WebhookID: {in: path, name: webhookId, required: true, schema: {type: string, format: uuid}}
+    CaseID: {in: path, name: caseId, required: true, schema: {type: string, format: uuid}}
+    OrgUserID: {in: path, name: userId, required: true, schema: {type: string, format: uuid}}
+    BatchID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    ClaimID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    ManufacturerID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    PolicyID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    PolicyVersionID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    JobID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    ExportID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    ContractPharmacyID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    DisputeID: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+    Limit: {in: query, name: limit, required: false, schema: {type: integer, minimum: 1, maximum: 500, default: 50}}
+    Offset: {in: query, name: offset, required: false, schema: {type: integer, minimum: 0, default: 0}}
+  responses:
+    ValidationError:
+      description: Request validation failed.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ValidationErrorResponse"}
+    UnauthorizedError:
+      description: Missing or invalid authentication credentials.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+    ForbiddenError:
+      description: Authenticated but not allowed to perform this action.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+    NotFoundError:
+      description: Requested resource does not exist.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+    ConflictError:
+      description: Request conflicts with current resource state.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+    InternalError:
+      description: Unexpected server-side failure.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorResponse"}
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error: {type: string}
+        code: {type: string}
+        request_id: {type: string}
+        trace_id: {type: string, description: Correlates with X-Trace-Id and OpenTelemetry trace}
+    ValidationIssue:
+      type: object
+      required: [field, message]
+      properties:
+        field: {type: string}
+        message: {type: string}
+    ValidationErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error: {type: string}
+        code: {type: string, example: VALIDATION_ERROR}
+        request_id: {type: string}
+        details:
+          type: array
+          items: {$ref: "#/components/schemas/ValidationIssue"}
+    RegisterRequest:
+      type: object
+      required: [org_id, email, name, password]
+      properties:
+        org_id: {type: string, format: uuid}
+        email: {type: string}
+        name: {type: string}
+        password: {type: string}
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string}
+        password: {type: string}
+        totp_code: {type: string, description: Required when mfa_enabled (unless using backup_code)}
+        backup_code: {type: string, description: One-time MFA backup code when mfa_enabled}
+    CreateOrganizationRequest:
+      type: object
+      required: [name, entity_id]
+      properties:
+        name: {type: string}
+        entity_id: {type: string}
+    CreateBatchRequest:
+      type: object
+      required: [file_name, rows]
+      properties:
+        file_name: {type: string}
+        rows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    CreateManufacturerRequest:
+      type: object
+      required: [name, labeler_code]
+      properties:
+        name: {type: string}
+        labeler_code: {type: string}
+    CreateManufacturerProductRequest:
+      type: object
+      required: [ndc]
+      properties:
+        ndc: {type: string}
+        product_name: {type: string}
+    CreatePolicyRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        status: {type: string}
+    CreatePolicyVersionRequest:
+      type: object
+      required: [version_number, effective_from]
+      properties:
+        version_number: {type: integer, format: int32}
+        effective_from: {type: string, format: date}
+        effective_to: {type: string, format: date}
+    CreatePolicyRuleRequest:
+      type: object
+      required: [rule_type, rule_config]
+      properties:
+        rule_type: {type: string}
+        rule_config:
+          type: object
+          additionalProperties: true
+    CreateRebateRecordRequest:
+      type: object
+      required: [manufacturer_id, org_id, ndc, pharmacy_npi, service_date, quantity]
+      properties:
+        manufacturer_id: {type: string, format: uuid}
+        org_id: {type: string, format: uuid}
+        ndc: {type: string}
+        pharmacy_npi: {type: string}
+        service_date: {type: string, format: date}
+        quantity: {type: integer, format: int32}
+        hashed_rx_key: {type: string}
+        payer_type: {type: string}
+        rebate_amount: {type: number, format: double}
+        source: {type: string}
+    CreateExportRequest:
+      type: object
+      required: [report_type, from_date, to_date]
+      properties:
+        report_type:
+          type: string
+          enum:
+            - manufacturer_compliance
+            - duplicate_findings
+            - submission_completeness
+            - exceptions
+            - batch_reconciliation_results
+        from_date: {type: string, format: date}
+        to_date: {type: string, format: date}
+        org_id: {type: string, format: uuid}
+        manufacturer_id: {type: string, format: uuid}
+        batch_id: {type: string, format: uuid}
+    OverrideRequest:
+      type: object
+      required: [new_status, reason]
+      properties:
+        new_status: {type: string}
+        reason: {type: string}
+        rebate_record_id: {type: string, format: uuid}
+    CreateContractPharmacyRequest:
+      type: object
+      required: [org_id, pharmacy_name, pharmacy_npi, effective_from]
+      properties:
+        org_id: {type: string, format: uuid}
+        pharmacy_name: {type: string}
+        pharmacy_npi: {type: string}
+        dea_number: {type: string}
+        address: {type: string}
+        city: {type: string}
+        state: {type: string}
+        zip: {type: string}
+        effective_from: {type: string, format: date}
+        effective_to: {type: string, format: date}
+    CreateDisputeRequest:
+      type: object
+      required: [claim_id, manufacturer_id, reason_code, description]
+      properties:
+        claim_id: {type: string, format: uuid}
+        manufacturer_id: {type: string, format: uuid}
+        reason_code:
+          type: string
+          enum: [duplicate_discount, eligibility, pricing, incorrect_ndc, other]
+        description: {type: string}

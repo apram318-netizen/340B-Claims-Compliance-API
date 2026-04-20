@@ -1,0 +1,15 @@
+# Shared volume for generated export files.
+# Use ReadWriteMany so both the API (download) and worker (write) pods can mount it.
+# In production, prefer object storage (S3/GCS) over a shared PVC.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: export-storage
+  namespace: claims-system
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: your-rwx-storage-class  # e.g. efs-sc, nfs-client

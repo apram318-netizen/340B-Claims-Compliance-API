@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claims-api
+  namespace: claims-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: claims-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claims-worker
+  namespace: claims-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: claims-worker

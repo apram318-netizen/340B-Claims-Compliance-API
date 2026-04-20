@@ -1,0 +1,29 @@
+# Requires an ingress controller (e.g. ingress-nginx) and cert-manager for TLS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: claims-api
+  namespace: claims-system
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "11m"       # > maxUploadSize (10 MB)
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    cert-manager.io/cluster-issuer: letsencrypt-prod         # adjust to your issuer
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.example.com   # replace with your domain
+      secretName: claims-api-tls
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: claims-api
+                port:
+                  name: http

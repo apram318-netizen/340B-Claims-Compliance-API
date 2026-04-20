@@ -1,0 +1,38 @@
+# Weekly job to delete audit_events past retention (see PurgeExpiredAuditEvents).
+# Build image: docker build -f Dockerfile.purge-audit -t your-registry/claims-purge-audit:latest .
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claims-audit-purge
+  namespace: claims-system
+spec:
+  schedule: "0 3 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: claims-system
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: purge-audit
+              image: your-registry/claims-purge-audit:latest
+              imagePullPolicy: Always
+              envFrom:
+                - secretRef:
+                    name: claims-system-secrets
+              resources:
+                requests:
+                  cpu: "10m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "128Mi"

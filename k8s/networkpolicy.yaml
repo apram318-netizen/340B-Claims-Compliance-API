@@ -1,0 +1,55 @@
+# API: accepts inbound from ingress controller only; egress to postgres, rabbitmq, and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claims-api
+  namespace: claims-system
+spec:
+  podSelector:
+    matchLabels:
+      app: claims-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 5432   # PostgreSQL
+        - port: 5671   # AMQP TLS
+        - port: 5672   # AMQP plain (disable in production)
+---
+# Worker: no inbound from outside; egress to postgres, rabbitmq, and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claims-worker
+  namespace: claims-system
+spec:
+  podSelector:
+    matchLabels:
+      app: claims-worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []   # no inbound traffic (metrics scraped internally if needed — add prometheus NS selector)
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 5432
+        - port: 5671
+        - port: 5672
